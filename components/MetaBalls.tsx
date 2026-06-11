@@ -76,15 +76,77 @@ uniform float iClumpFactor;
 uniform bool enableTransparency;
 uniform sampler2D iSceneTex;
 uniform bool iHasScene;
-uniform float iRefraction;
+uniform float iLightVariable;
+uniform float iLightIntensity;
+uniform float iStrokeWidth;
+uniform float iOpacity;
 uniform float iFrost;
+uniform float iDepth;
 out vec4 outColor;
 const float PI = 3.14159265359;
+const float TAU = 6.28318530718;
 
 float getMetaBallValue(vec2 c, float r, vec2 p) {
   vec2 d = p - c;
   float dist2 = dot(d, d);
   return (r * r) / dist2;
+}
+
+vec3 gaussianBlurScene(vec2 uv, vec2 refr, float frostAmt) {
+  float blurCurve = pow(clamp(frostAmt, 0.0, 1.0), 1.45);
+  float sigma = mix(0.01, 0.085, blurCurve);
+  vec3 acc = vec3(0.0);
+  float weightSum = 0.0;
+
+  for (int x = -4; x <= 4; x++) {
+    for (int y = -4; y <= 4; y++) {
+      vec2 tap = vec2(float(x), float(y));
+      float w = exp(-dot(tap, tap) / 8.0);
+      acc += texture(iSceneTex, uv + refr + tap * sigma).rgb * w;
+      weightSum += w;
+    }
+  }
+
+  vec3 blurred = acc / weightSum;
+
+  // Second, wider pass softens detail into a frosted-glass read.
+  acc = vec3(0.0);
+  weightSum = 0.0;
+  float wideSigma = sigma * mix(1.7, 2.45, blurCurve);
+  for (int x = -3; x <= 3; x++) {
+    for (int y = -3; y <= 3; y++) {
+      vec2 tap = vec2(float(x), float(y));
+      float w = exp(-dot(tap, tap) / 5.5);
+      acc += texture(iSceneTex, uv + refr + tap * wideSigma).rgb * w;
+      weightSum += w;
+    }
+  }
+  vec3 wideBlur = acc / weightSum;
+
+  // Extra-large blur only in high-frost range for true frosted glass.
+  acc = vec3(0.0);
+  weightSum = 0.0;
+  float extraSigma = sigma * 3.6;
+  for (int x = -2; x <= 2; x++) {
+    for (int y = -2; y <= 2; y++) {
+      vec2 tap = vec2(float(x), float(y));
+      float w = exp(-dot(tap, tap) / 3.8);
+      acc += texture(iSceneTex, uv + refr + tap * extraSigma).rgb * w;
+      weightSum += w;
+    }
+  }
+  vec3 extraBlur = acc / weightSum;
+  float heavyMix = smoothstep(0.62, 1.0, frostAmt);
+  return mix(mix(blurred, wideBlur, 0.6), extraBlur, heavyMix * 0.82);
+}
+
+vec3 applyLiquidGlass(vec3 color, float frostAmt) {
+  // Keep transmission clear and avoid "milky" overlays.
+  float luma = dot(color, vec3(0.299, 0.587, 0.114));
+  vec3 saturated = mix(vec3(luma), color, 1.08);
+  vec3 centered = saturated - vec3(0.5);
+  color = vec3(0.5) + centered * mix(1.05, 1.16, frostAmt);
+  return clamp(color, 0.0, 1.0);
 }
 
 void main() {
@@ -103,72 +165,74 @@ void main() {
   // Antialiased coverage of the metaball surface (original threshold logic).
   float f = smoothstep(-1.0, 1.0, (total - 1.3) / min(1.0, fwidth(total)));
 
-  // Smooth "dome" height field used for fake 3D glass lighting + refraction.
-  // Derivatives must be evaluated in uniform control flow, so compute first.
-  float height = smoothstep(0.6, 3.2, total);
+  // Smooth spherical dome — softer cap avoids a flattened top.
+  float height = smoothstep(0.45, 2.6, total);
   vec2 grad = vec2(dFdx(height), dFdy(height));
+  float domeRoundness = mix(0.72, 0.38, iDepth);
+  vec3 normal = normalize(vec3(-grad * mix(0.85, 1.25, iDepth), domeRoundness));
 
   if (f <= 0.0015) {
     outColor = vec4(0.0);
     return;
   }
 
-  // Steep slopes at the rim, flat facing the viewer in the body.
-  vec3 normal = normalize(vec3(-grad * 1.9, 0.22));
-
+  float lightAngle = iLightVariable * TAU;
+  vec3 lightDir = normalize(
+    vec3(cos(lightAngle) * 0.55, sin(lightAngle) * 0.45 + 0.18, 0.82)
+  );
   vec3 viewDir = vec3(0.0, 0.0, 1.0);
-  vec3 lightDir = normalize(vec3(-0.42, 0.68, 0.74));
   vec3 halfDir = normalize(lightDir + viewDir);
 
   float diffuse = clamp(dot(normal, lightDir), 0.0, 1.0);
-  float specular = pow(clamp(dot(normal, halfDir), 0.0, 1.0), 46.0);
-  float fresnel = pow(1.0 - clamp(normal.z, 0.0, 1.0), 2.3);
+  float tightSpecPower = mix(130.0, 46.0, iLightIntensity);
+  float specTight = pow(clamp(dot(normal, halfDir), 0.0, 1.0), tightSpecPower) * iLightIntensity * 0.45;
+  float specWide = pow(clamp(dot(normal, halfDir), 0.0, 1.0), 22.0) * iLightIntensity * 0.18;
+  float specular = specTight + specWide;
+  float fresnel = pow(1.0 - clamp(normal.z, 0.0, 1.0), 1.55) * 0.36 * iLightIntensity;
 
-  // Base translucent tint (keeps the color + cursor-color controls working).
   vec3 tint = iColor;
   if (total > 0.0) {
     tint = iColor * (m1 / total) + iCursorColor * (m2 / total);
   }
 
-  // Top-of-dome sheen for an inner highlight band.
-  float sheen = clamp(normal.y, 0.0, 1.0) * height;
-
   vec3 glass;
   float alpha;
 
   if (iHasScene) {
-    // ---- Frosted glass: refract + blur the scene (background + slogan) ------
     vec2 uv = gl_FragCoord.xy / iResolution.xy;
     uv.y = 1.0 - uv.y;
-    // Lens displacement: bend more strongly toward the rim of each ball.
-    vec2 refr = normal.xy * iRefraction;
-    // Poisson-disk multi-tap blur for the frosted look.
-    const vec2 taps[12] = vec2[12](
-      vec2(-0.326, -0.406), vec2(-0.840, -0.074), vec2(-0.696, 0.457),
-      vec2(-0.203, 0.621), vec2(0.962, -0.195), vec2(0.473, -0.480),
-      vec2(0.519, 0.767), vec2(0.185, -0.893), vec2(0.507, 0.064),
-      vec2(0.896, 0.412), vec2(-0.322, -0.933), vec2(-0.792, -0.598)
+    vec2 refr = normal.xy * iDepth * 0.07;
+    float dispersion = mix(0.0007, 0.0022, iDepth) * (0.35 + fresnel * 1.6);
+    vec3 blurred = gaussianBlurScene(uv, refr, iFrost);
+    vec3 split = vec3(
+      texture(iSceneTex, uv + refr + normal.xy * dispersion).r,
+      texture(iSceneTex, uv + refr).g,
+      texture(iSceneTex, uv + refr - normal.xy * dispersion).b
     );
-    vec3 acc = texture(iSceneTex, uv + refr).rgb;
-    for (int i = 0; i < 12; i++) {
-      acc += texture(iSceneTex, uv + refr + taps[i] * iFrost).rgb;
-    }
-    vec3 sceneCol = acc / 13.0;
-    // Slight cool tint + light wash so it still reads as a colored glass body.
-    glass = mix(sceneCol, tint, 0.14) * (0.97 + 0.10 * diffuse);
-    alpha = f;
+    float splitMix = mix(0.26, 0.03, smoothstep(0.45, 1.0, iFrost));
+    vec3 sceneCol = mix(blurred, split, splitMix);
+    sceneCol = applyLiquidGlass(sceneCol, iFrost);
+    float lighting = mix(1.03, 1.2, diffuse * iLightIntensity);
+    glass = mix(sceneCol, tint, 0.03) * lighting;
+    alpha = f * iOpacity;
   } else {
-    glass = tint * (0.58 + 0.30 * diffuse);
-    alpha = f * (0.22 + 0.52 * fresnel);
+    glass = tint * mix(0.68, 0.92, diffuse * iLightIntensity);
+    alpha = f * iOpacity * mix(0.35, 0.75, fresnel + 0.35);
   }
 
-  // Cool fresnel rim + inner sheen + bright specular glint on top.
-  glass += vec3(0.72, 0.85, 1.0) * fresnel * 0.5;
-  glass += vec3(1.0) * sheen * 0.16;
-  glass += vec3(1.0) * specular * 1.4;
+  glass += vec3(0.78, 0.88, 1.0) * fresnel;
+  glass += vec3(1.0) * specular;
+  float crest = pow(clamp(1.0 - abs(normal.y + 0.14), 0.0, 1.0), 11.0) * (0.11 + 0.09 * iLightIntensity);
+  glass += vec3(1.0) * crest;
 
-  alpha += (specular + sheen * 0.1) * f;
-  alpha = clamp(alpha, 0.0, 1.0);
+  // Tapered rim stroke: thin at poles, thicker mid-arc (#ffffff @ 70%).
+  float azimuth = atan(normal.y, normal.x);
+  float taper = mix(0.18, 1.0, pow(abs(sin(azimuth * 2.0)), 0.65));
+  float strokePx = iStrokeWidth / iResolution.y;
+  float edgeBand = smoothstep(0.08, 0.0, abs(total - 1.3) - strokePx * 3.5);
+  float stroke = edgeBand * taper * 0.7;
+  glass = mix(glass, vec3(1.0), stroke);
+  alpha = clamp(alpha + stroke * 0.35, 0.0, 1.0);
 
   outColor = vec4(glass, enableTransparency ? alpha : 1.0);
 }
@@ -185,10 +249,12 @@ export type MetaBallsProps = {
   cursorBallSize?: number;
   cursorBallColor?: string;
   enableTransparency?: boolean;
-  /** Strength of the glass refraction (0..1). */
-  refraction?: number;
-  /** Amount of frosted blur applied to the refracted scene (0..1). */
+  lightVariable?: number;
+  lightIntensity?: number;
+  strokeWidth?: number;
+  opacity?: number;
   frost?: number;
+  depth?: number;
   /** Image layers (drawn behind, in order) that the glass refracts/blurs. */
   sceneSrc?: string;
   sloganSrc?: string;
@@ -208,8 +274,12 @@ const MetaBalls = ({
   cursorBallSize = 3,
   cursorBallColor = "#ffffff",
   enableTransparency = false,
-  refraction = 0.5,
+  lightVariable = 0.4,
+  lightIntensity = 0.6,
+  strokeWidth = 1,
+  opacity = 0.7,
   frost = 0.55,
+  depth = 0.3,
   sceneSrc = "/assets/background.jpg",
   sloganSrc = "/assets/slogan.svg",
   sloganWidthVw = 0.3535,
@@ -277,8 +347,12 @@ const MetaBalls = ({
         enableTransparency: { value: enableTransparency },
         iSceneTex: { value: sceneTexture },
         iHasScene: { value: false },
-        iRefraction: { value: refraction * 0.06 },
-        iFrost: { value: frost * 0.014 },
+        iLightVariable: { value: lightVariable },
+        iLightIntensity: { value: lightIntensity },
+        iStrokeWidth: { value: strokeWidth },
+        iOpacity: { value: opacity },
+        iFrost: { value: frost },
+        iDepth: { value: depth },
       },
     });
 
@@ -457,8 +531,12 @@ const MetaBalls = ({
     clumpFactor,
     cursorBallSize,
     enableTransparency,
-    refraction,
+    lightVariable,
+    lightIntensity,
+    strokeWidth,
+    opacity,
     frost,
+    depth,
     sceneSrc,
     sloganSrc,
     sloganWidthVw,

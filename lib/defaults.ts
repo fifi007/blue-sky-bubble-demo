@@ -12,6 +12,10 @@ export const DEFAULT_SETTINGS: MetaBallSettings = {
   hoverSmoothness: 0.05,
   cursorBallSize: 3,
   enableTransparency: true,
-  refraction: 0.5,
+  lightVariable: 0.4,
+  lightIntensity: 0.6,
+  strokeWidth: 1,
+  opacity: 0.7,
   frost: 0.55,
+  depth: 0.3,
 };

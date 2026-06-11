@@ -9,8 +9,12 @@ export type MetaBallSettings = {
   hoverSmoothness: number;
   cursorBallSize: number;
   enableTransparency: boolean;
-  refraction: number;
+  lightVariable: number;
+  lightIntensity: number;
+  strokeWidth: number;
+  opacity: number;
   frost: number;
+  depth: number;
 };
 
 export type MetaBallSettingKey = keyof MetaBallSettings;

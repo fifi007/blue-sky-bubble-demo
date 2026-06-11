@@ -142,9 +142,52 @@ export function CustomizePanel({
                     aria-label="Ball color"
                   />
                 </div>
+              </div>
+
+              <div className="divider" />
+
+              <div className="section">
+                <p className="section-title">Glass</p>
 
                 <SliderControl
-                  label="Frost (blur)"
+                  label="Light variable"
+                  value={settings.lightVariable}
+                  min={0}
+                  max={1}
+                  step={0.01}
+                  onChange={(v) => onChange("lightVariable", v)}
+                />
+
+                <SliderControl
+                  label="Light intensity"
+                  value={settings.lightIntensity}
+                  min={0}
+                  max={1}
+                  step={0.01}
+                  onChange={(v) => onChange("lightIntensity", v)}
+                />
+
+                <SliderControl
+                  label="Stroke width"
+                  value={settings.strokeWidth}
+                  min={0}
+                  max={4}
+                  step={0.1}
+                  onChange={(v) => onChange("strokeWidth", v)}
+                  format={(v) => v.toFixed(1)}
+                />
+
+                <SliderControl
+                  label="Opacity"
+                  value={settings.opacity}
+                  min={0}
+                  max={1}
+                  step={0.01}
+                  onChange={(v) => onChange("opacity", v)}
+                />
+
+                <SliderControl
+                  label="Frost (Gaussian blur)"
                   value={settings.frost}
                   min={0}
                   max={1}
@@ -153,12 +196,12 @@ export function CustomizePanel({
                 />
 
                 <SliderControl
-                  label="Refraction"
-                  value={settings.refraction}
+                  label="Depth"
+                  value={settings.depth}
                   min={0}
                   max={1}
                   step={0.01}
-                  onChange={(v) => onChange("refraction", v)}
+                  onChange={(v) => onChange("depth", v)}
                 />
               </div>
 
